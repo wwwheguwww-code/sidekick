@@ -1,16 +1,43 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 
 /* ============================================================
-   SIDEKICK v0.2 demo — アイドル運営と制作の、相棒AI
-   v0.1からの追加:
-   - 曲マスタ（登録/一括インポート/別名=表記ゆれ対応/削除）
-   - セトリ入力ハイブリッド（テキスト貼付 + 検索選択 + クイックチップ）
-   - グループ設定（グループ名 / 項目ON・OFF）→ 解析表示に連動
-   ※永続化はPhase 2（今はリロードで初期状態に戻る。移植後に
-     localStorage → Supabase の順で永続化する）
+   SIDEKICK v0.3 demo — アイドル運営と制作の、相棒AI
+   v0.2 → v0.3:
+   - テーマ切替（ダーク: Pro Console / ライト: Studio Light）
+     設定タブから選択。CSS変数方式でスキンを一括切替
+   - UI品質の引き上げ（A/Bモックで検証した質感を反映）
+     ダーク: 深い黒・細罫線・高密度 / ライト: 白基調・影・ゆったり
+   ※永続化(localStorage)はレクス実装担当:
+     対象 = catalog / settings(theme含む) / raw
+     初回のみKOURiNプリセット、以降は保存値優先
    ============================================================ */
 
-/* ---------- KOURiNプリセット（デモ初期データ） ---------- */
+/* ---------- テーマ定義 ---------- */
+const THEMES = {
+  dark: {
+    "--bg": "#0E1015", "--surface": "#14171F", "--surface2": "#191D27",
+    "--border": "#232734", "--border-soft": "#1C202B",
+    "--ink": "#E7E9EF", "--dim": "#9BA1B2", "--faint": "#5B6172",
+    "--accent": "#FFB454", "--accent-ink": "#0E1015",
+    "--go": "#3DD68C", "--alert": "#F0635C", "--purple": "#A78BFA", "--pink": "#F492C8",
+    "--radius": "8px", "--radius-lg": "10px",
+    "--row-pad": "9px 14px", "--card-pad": "16px",
+    "--shadow": "none", "--tc-size": "34px", "--fader-h": "5px",
+  },
+  light: {
+    "--bg": "#F6F7F9", "--surface": "#FFFFFF", "--surface2": "#FAFBFC",
+    "--border": "#E4E7ED", "--border-soft": "#EDEFF3",
+    "--ink": "#1B1F2A", "--dim": "#5F6675", "--faint": "#9AA1AF",
+    "--accent": "#E8940A", "--accent-ink": "#FFFFFF",
+    "--go": "#189A5C", "--alert": "#D9403A", "--purple": "#7C5CE0", "--pink": "#D6559A",
+    "--radius": "12px", "--radius-lg": "14px",
+    "--row-pad": "12px 16px", "--card-pad": "20px",
+    "--shadow": "0 1px 3px rgba(16,20,30,.05), 0 4px 16px rgba(16,20,30,.04)",
+    "--tc-size": "38px", "--fader-h": "8px",
+  },
+};
+
+/* ---------- KOURiNプリセット ---------- */
 const KOURIN_PRESET = [
   { name: "SE", sec: 57, aliases: [] },
   { name: "Shine", sec: 187, aliases: [] },
@@ -72,6 +99,26 @@ SEKAIE☆ 20
 Chuu♡Cute 20
 クマリデパート 30`;
 
+/* ---------- 永続化(localStorage) ----------
+   catalog / settings / raw の3値のみ対象。初回訪問(保存値なし)は
+   呼び出し側のfallback(KOURiNプリセット等)を使う。 */
+const LS_PREFIX = "sidekick.";
+function loadLS(key, fallback) {
+  try {
+    const raw = localStorage.getItem(LS_PREFIX + key);
+    return raw === null ? fallback : JSON.parse(raw);
+  } catch {
+    return fallback;
+  }
+}
+function saveLS(key, value) {
+  try {
+    localStorage.setItem(LS_PREFIX + key, JSON.stringify(value));
+  } catch {
+    /* private mode / quota超過などは無視して継続 */
+  }
+}
+
 /* ---------- utils ---------- */
 const norm = (s) => s.toLowerCase().replace(/[\s'’!！・．.（）()]/g, "").replace(/ー/g, "");
 const fmt = (sec) => {
@@ -79,7 +126,6 @@ const fmt = (sec) => {
   const s = Math.abs(sec) % 60;
   return `${sec < 0 ? "-" : ""}${m}:${String(s).padStart(2, "0")}`;
 };
-
 function findCatalog(title, catalog) {
   const n = norm(title);
   let hit = catalog.find((c) => norm(c.name) === n || (c.aliases || []).some((a) => norm(a) === n));
@@ -93,8 +139,6 @@ function findHistory(title) {
   for (const show of HISTORY) if (show.songs.some((s) => norm(s) === n)) return show;
   return null;
 }
-
-/* ---------- セトリ解析（カタログ・設定連動版） ---------- */
 function parseSetlist(text, catalog, settings) {
   const rows = [];
   for (const line of text.split("\n").map((l) => l.trim()).filter(Boolean)) {
@@ -132,7 +176,6 @@ function parseSetlist(text, catalog, settings) {
     recent: settings.showRecent && !r.isMC && !r.isSE ? findHistory(r.title) : null,
   }));
 }
-
 function parseImport(text, existing) {
   const out = []; let skipped = 0;
   for (const line of text.split("\n").map((l) => l.trim()).filter(Boolean)) {
@@ -147,8 +190,6 @@ function parseImport(text, existing) {
   }
   return { out, skipped };
 }
-
-/* ---------- TT ---------- */
 function buildTimetable(text, startTime, changeover) {
   const acts = [];
   for (const line of text.split("\n").map((l) => l.trim()).filter(Boolean)) {
@@ -167,40 +208,62 @@ function buildTimetable(text, startTime, changeover) {
 }
 const clock = (m) => `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
 
-const CUE_STYLE = {
-  "音先": { bg: "rgba(255,180,84,.16)", fg: "#FFB454", bd: "rgba(255,180,84,.4)" },
-  "連続": { bg: "rgba(138,145,166,.14)", fg: "#AEB4C6", bd: "rgba(138,145,166,.35)" },
-  "曲振": { bg: "rgba(74,222,128,.13)", fg: "#4ADE80", bd: "rgba(74,222,128,.4)" },
-  "inst BGM": { bg: "rgba(167,139,250,.15)", fg: "#B9A6FB", bd: "rgba(167,139,250,.4)" },
-};
+const CUE_VAR = { "音先": "--accent", "連続": "--dim", "曲振": "--go", "inst BGM": "--purple" };
 const MEMBER_COLORS = ["#A78BFA", "#FDE047", "#4ADE80", "#F1F5F9", "#FB923C", "#F9A8D4"];
 
-/* ---------- 小物 ---------- */
+/* ---------- 共通スタイル（CSS変数参照） ---------- */
 const inputStyle = {
-  background: "#12151E", color: "#EDEFF5", border: "1px solid #262C3F",
-  borderRadius: 6, padding: "7px 10px", fontFamily: "'JetBrains Mono', monospace", fontSize: 13,
+  background: "var(--surface2)", color: "var(--ink)", border: "1px solid var(--border)",
+  borderRadius: "var(--radius)", padding: "8px 10px",
+  fontFamily: "'JetBrains Mono', monospace", fontSize: 13,
 };
-const cardStyle = { background: "#1C2130", border: "1px solid #262C3F", borderRadius: 12 };
+const cardStyle = {
+  background: "var(--surface)", border: "1px solid var(--border)",
+  borderRadius: "var(--radius-lg)", boxShadow: "var(--shadow)",
+};
+const btnStyle = (enabled = true) => ({
+  padding: "9px 20px", borderRadius: "var(--radius)", border: "none",
+  background: enabled ? "var(--accent)" : "var(--border)",
+  color: enabled ? "var(--accent-ink)" : "var(--faint)",
+  fontWeight: 700, fontSize: 13, cursor: enabled ? "pointer" : "not-allowed",
+  fontFamily: "'Noto Sans JP'",
+});
+const ghostBtn = {
+  padding: "8px 12px", borderRadius: "var(--radius)", border: "1px solid var(--border)",
+  background: "transparent", color: "var(--dim)", fontSize: 12, cursor: "pointer",
+};
+
+function Badge({ cue }) {
+  const v = CUE_VAR[cue];
+  return (
+    <span style={{
+      fontSize: 11, fontWeight: 700, padding: "3px 9px", borderRadius: 99, whiteSpace: "nowrap", flexShrink: 0,
+      background: `color-mix(in srgb, var(${v}) 12%, transparent)`,
+      color: `var(${v})`,
+      border: `1px solid color-mix(in srgb, var(${v}) 32%, transparent)`,
+    }}>{cue}</span>
+  );
+}
 
 function Toggle({ on, onChange, label, desc }) {
   return (
     <button onClick={() => onChange(!on)} style={{
       display: "flex", alignItems: "center", gap: 14, width: "100%", textAlign: "left",
       background: "transparent", border: "none", cursor: "pointer", padding: "14px 0",
-      borderBottom: "1px solid #232941",
+      borderBottom: "1px solid var(--border-soft)",
     }}>
       <span style={{
         width: 40, height: 22, borderRadius: 99, flexShrink: 0, position: "relative",
-        background: on ? "rgba(255,180,84,.9)" : "#262C3F", transition: "background .2s",
+        background: on ? "var(--accent)" : "var(--border)", transition: "background .2s",
       }}>
         <span style={{
           position: "absolute", top: 3, left: on ? 21 : 3, width: 16, height: 16,
-          borderRadius: 99, background: "#12151E", transition: "left .2s",
+          borderRadius: 99, background: "var(--surface)", transition: "left .2s",
         }} />
       </span>
       <span>
-        <span style={{ display: "block", fontSize: 14, fontWeight: 700, color: "#EDEFF5" }}>{label}</span>
-        <span style={{ display: "block", fontSize: 11, color: "#8A91A6", marginTop: 2 }}>{desc}</span>
+        <span style={{ display: "block", fontSize: 14, fontWeight: 700, color: "var(--ink)" }}>{label}</span>
+        <span style={{ display: "block", fontSize: 11, color: "var(--dim)", marginTop: 2 }}>{desc}</span>
       </span>
     </button>
   );
@@ -212,29 +275,29 @@ export default function Sidekick() {
   const [toast, setToast] = useState(null);
   const ping = (msg) => { setToast(msg); setTimeout(() => setToast(null), 2800); };
 
-  /* 設定 */
-  const [settings, setSettings] = useState({
+  const [settings, setSettings] = useState(() => loadLS("settings", {
     groupName: "KOURiN",
+    theme: "dark",
     showCue: true,
     autoExit: true,
     showRecent: true,
-  });
+  }));
   const set = (k, v) => setSettings((s) => ({ ...s, [k]: v }));
+  useEffect(() => { saveLS("settings", settings); }, [settings]);
 
-  /* 曲マスタ */
-  const [catalog, setCatalog] = useState(KOURIN_PRESET);
+  const [catalog, setCatalog] = useState(() => loadLS("catalog", KOURIN_PRESET));
+  useEffect(() => { saveLS("catalog", catalog); }, [catalog]);
   const [newName, setNewName] = useState("");
   const [newLen, setNewLen] = useState("");
   const [newAlias, setNewAlias] = useState("");
   const [importText, setImportText] = useState("");
 
-  /* セトリ */
-  const [raw, setRaw] = useState("");
+  const [raw, setRaw] = useState(() => loadLS("raw", ""));
+  useEffect(() => { saveLS("raw", raw); }, [raw]);
   const [limit, setLimit] = useState(65);
   const [parsed, setParsed] = useState(null);
   const [query, setQuery] = useState("");
 
-  /* TT */
   const [ttRaw, setTtRaw] = useState("");
   const [ttStart, setTtStart] = useState("18:00");
   const [ttChange, setTtChange] = useState(10);
@@ -260,14 +323,12 @@ export default function Sidekick() {
     const n = norm(newName);
     if (catalog.some((c) => norm(c.name) === n)) { ping("同名の曲が登録済みです"); return; }
     setCatalog((c) => [...c, {
-      name: newName.trim(),
-      sec: parseInt(m[1]) * 60 + parseInt(m[2]),
+      name: newName.trim(), sec: parseInt(m[1]) * 60 + parseInt(m[2]),
       aliases: newAlias.split(",").map((a) => a.trim()).filter(Boolean),
     }]);
     setNewName(""); setNewLen(""); setNewAlias("");
     ping("曲を登録しました");
   };
-
   const runImport = () => {
     const { out, skipped } = parseImport(importText, catalog);
     if (out.length === 0) { ping(skipped ? "すべて登録済みでした" : "「曲名 M:SS」形式の行が見つかりません"); return; }
@@ -284,77 +345,75 @@ export default function Sidekick() {
   ];
 
   return (
-    <div style={{ minHeight: "100vh", background: "#12151E", color: "#EDEFF5", fontFamily: "'Noto Sans JP', sans-serif" }}>
+    <div style={{
+      ...THEMES[settings.theme],
+      minHeight: "100vh", background: "var(--bg)", color: "var(--ink)",
+      fontFamily: "'Inter','Noto Sans JP',sans-serif", transition: "background .25s",
+    }}>
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=JetBrains+Mono:wght@500;700&family=Noto+Sans+JP:wght@400;500;700&display=swap');
-        ::selection { background: rgba(255,180,84,.3); }
-        textarea:focus, input:focus { outline: 2px solid rgba(255,180,84,.5); outline-offset: 1px; }
+        @import url('https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600;700&family=Noto+Sans+JP:wght@400;500;700&display=swap');
+        ::selection { background: color-mix(in srgb, #FFB454 35%, transparent); }
+        textarea:focus, input:focus { outline: 2px solid color-mix(in srgb, #FFB454 55%, transparent); outline-offset: 1px; }
         .fadein { animation: fi .35s ease; }
         @keyframes fi { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
         @media (prefers-reduced-motion: reduce) { .fadein { animation: none; } }
-        .two-col { display: grid; grid-template-columns: minmax(300px, 420px) 1fr; gap: 20px; align-items: start; }
+        .two-col { display: grid; grid-template-columns: minmax(300px, 420px) 1fr; gap: 18px; align-items: start; }
         @media (max-width: 860px) { .two-col { grid-template-columns: 1fr; } }
+        .sk-row:hover { background: color-mix(in srgb, var(--ink) 3%, transparent); }
       `}</style>
 
       {/* ===== ヘッダー ===== */}
-      <header style={{ borderBottom: "1px solid #262C3F", padding: "18px 24px", display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
-        <div style={{ display: "flex", alignItems: "baseline", gap: 12 }}>
-          <span style={{ fontFamily: "'Chakra Petch'", fontWeight: 700, fontSize: 26, letterSpacing: ".08em", color: "#FFB454" }}>SIDEKICK</span>
-          <span style={{ fontSize: 12, color: "#8A91A6" }}>for <b style={{ color: "#AEB4C6" }}>{settings.groupName || "あなたのグループ"}</b></span>
-        </div>
-        <div style={{ display: "flex", gap: 4, marginLeft: "auto" }}>
-          {MEMBER_COLORS.map((c, i) => <span key={i} style={{ width: 7, height: 7, borderRadius: 99, background: c, opacity: .85 }} />)}
-        </div>
+      <header style={{ borderBottom: "1px solid var(--border)", padding: "16px 24px", display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+        <span style={{ fontFamily: "'Chakra Petch'", fontWeight: 700, fontSize: 22, letterSpacing: ".08em", color: "var(--accent)" }}>SIDEKICK</span>
+        <span style={{ fontSize: 12, color: "var(--dim)" }}>for <b style={{ color: "var(--ink)", fontWeight: 600 }}>{settings.groupName || "あなたのグループ"}</b></span>
+        <span style={{ marginLeft: "auto", display: "flex", gap: 4 }}>
+          {MEMBER_COLORS.map((c, i) => <i key={i} style={{ width: 6, height: 6, borderRadius: 99, background: c, opacity: .85, display: "block" }} />)}
+        </span>
       </header>
 
       {/* ===== タブ ===== */}
-      <nav style={{ display: "flex", gap: 8, padding: "16px 24px 0", flexWrap: "wrap" }}>
+      <nav style={{ display: "flex", gap: 6, padding: "14px 24px 0", flexWrap: "wrap" }}>
         {tabs.map((t) => (
           <button key={t.id} onClick={() => setMode(t.id)} style={{
-            padding: "9px 16px", borderRadius: 8, cursor: "pointer",
-            border: mode === t.id ? "1px solid rgba(255,180,84,.55)" : "1px solid #262C3F",
-            background: mode === t.id ? "rgba(255,180,84,.1)" : "#1C2130",
-            color: mode === t.id ? "#FFB454" : "#AEB4C6",
-            fontFamily: "'Noto Sans JP'", fontWeight: 700, fontSize: 14,
-            display: "flex", alignItems: "center", gap: 8,
+            padding: "8px 15px", borderRadius: "var(--radius)", cursor: "pointer",
+            border: mode === t.id ? "1px solid var(--accent)" : "1px solid var(--border)",
+            background: mode === t.id ? "color-mix(in srgb, var(--accent) 9%, var(--surface))" : "var(--surface)",
+            color: mode === t.id ? "var(--accent)" : "var(--dim)",
+            fontFamily: "'Noto Sans JP'", fontWeight: 700, fontSize: 13,
+            display: "flex", alignItems: "center", gap: 7,
           }}>
             {t.label}
-            {t.sub && <span style={{ fontSize: 10, fontWeight: 500, opacity: .7, border: "1px solid currentColor", borderRadius: 4, padding: "1px 5px" }}>{t.sub}</span>}
+            {t.sub && <span style={{ fontSize: 10, fontWeight: 500, opacity: .75, border: "1px solid currentColor", borderRadius: 4, padding: "1px 5px" }}>{t.sub}</span>}
           </button>
         ))}
       </nav>
 
       {/* ================= セットリスト ================= */}
       {mode === "setlist" && (
-        <main className="two-col" style={{ padding: 24 }}>
-          <section style={{ ...cardStyle, padding: 18 }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: "#AEB4C6", marginBottom: 10 }}>セットリストを作る</div>
-
-            {/* 曲マスタから追加 */}
+        <main className="two-col" style={{ padding: "20px 24px" }}>
+          <section style={{ ...cardStyle, padding: "var(--card-pad)" }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "var(--dim)", marginBottom: 10, letterSpacing: ".04em" }}>セットリストを作る</div>
             <div style={{ position: "relative", marginBottom: 10 }}>
-              <input
-                value={query} onChange={(e) => setQuery(e.target.value)}
+              <input value={query} onChange={(e) => setQuery(e.target.value)}
                 placeholder="曲マスタから検索して追加（例: fan）"
-                style={{ ...inputStyle, width: "100%", boxSizing: "border-box", fontFamily: "'Noto Sans JP'" }}
-              />
+                style={{ ...inputStyle, width: "100%", boxSizing: "border-box", fontFamily: "'Noto Sans JP'" }} />
               {candidates.length > 0 && (
-                <div style={{ position: "absolute", zIndex: 5, top: "calc(100% + 4px)", left: 0, right: 0, ...cardStyle, overflow: "hidden", boxShadow: "0 12px 32px rgba(0,0,0,.5)" }}>
+                <div style={{ position: "absolute", zIndex: 5, top: "calc(100% + 4px)", left: 0, right: 0, ...cardStyle, overflow: "hidden", boxShadow: "0 12px 32px rgba(0,0,0,.35)" }}>
                   {candidates.map((c, i) => (
                     <button key={i} onClick={() => addSong(c)} style={{
                       display: "flex", width: "100%", alignItems: "center", gap: 10, padding: "10px 14px",
-                      background: "transparent", border: "none", borderBottom: i < candidates.length - 1 ? "1px solid #232941" : "none",
-                      color: "#EDEFF5", cursor: "pointer", fontSize: 13, fontFamily: "'Noto Sans JP'", textAlign: "left",
+                      background: "transparent", border: "none",
+                      borderBottom: i < candidates.length - 1 ? "1px solid var(--border-soft)" : "none",
+                      color: "var(--ink)", cursor: "pointer", fontSize: 13, fontFamily: "'Noto Sans JP'", textAlign: "left",
                     }}>
                       <span style={{ flex: 1, fontWeight: 700 }}>{c.name}</span>
-                      <span style={{ fontFamily: "'JetBrains Mono'", fontSize: 12, color: "#8A91A6" }}>{fmt(c.sec)}</span>
-                      <span style={{ fontSize: 11, color: "#FFB454" }}>＋追加</span>
+                      <span style={{ fontFamily: "'JetBrains Mono'", fontSize: 12, color: "var(--dim)" }}>{fmt(c.sec)}</span>
+                      <span style={{ fontSize: 11, color: "var(--accent)" }}>＋追加</span>
                     </button>
                   ))}
                 </div>
               )}
             </div>
-
-            {/* クイックチップ */}
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
               {[
                 { label: "＋SE", line: () => { const se = catalog.find((c) => norm(c.name) === "se"); return se ? `SE ${fmt(se.sec)}` : "SE"; } },
@@ -363,82 +422,72 @@ export default function Sidekick() {
                 { label: "＋MC 2:00", line: () => "MC 2:00" },
               ].map((chip, i) => (
                 <button key={i} onClick={() => appendLine(chip.line())} style={{
-                  padding: "5px 10px", borderRadius: 99, border: "1px solid #262C3F",
-                  background: "#12151E", color: "#AEB4C6", fontSize: 12, cursor: "pointer",
+                  padding: "5px 11px", borderRadius: 99, border: "1px solid var(--border)",
+                  background: "transparent", color: "var(--dim)", fontSize: 12, cursor: "pointer",
                 }}>{chip.label}</button>
               ))}
             </div>
-
-            <textarea
-              value={raw} onChange={(e) => setRaw(e.target.value)}
+            <textarea value={raw} onChange={(e) => setRaw(e.target.value)}
               placeholder={"テキストをそのまま貼ってもOK\n例）New World 3:43\n尺を省略すれば曲マスタから自動補完"}
               rows={12}
-              style={{ ...inputStyle, width: "100%", boxSizing: "border-box", resize: "vertical", lineHeight: 1.7, padding: 12 }}
-            />
+              style={{ ...inputStyle, width: "100%", boxSizing: "border-box", resize: "vertical", lineHeight: 1.8, padding: 12 }} />
             <div style={{ display: "flex", gap: 10, marginTop: 12, alignItems: "center", flexWrap: "wrap" }}>
-              <label style={{ fontSize: 12, color: "#8A91A6" }}>持ち時間</label>
+              <label style={{ fontSize: 12, color: "var(--dim)" }}>持ち時間</label>
               <input type="number" value={limit} min={5} max={180} onChange={(e) => setLimit(Number(e.target.value))} style={{ ...inputStyle, width: 60 }} />
-              <span style={{ fontSize: 12, color: "#8A91A6" }}>分</span>
+              <span style={{ fontSize: 12, color: "var(--dim)" }}>分</span>
               <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
-                <button onClick={() => setRaw(SAMPLE)} style={{ padding: "8px 12px", borderRadius: 8, border: "1px solid #262C3F", background: "transparent", color: "#8A91A6", fontSize: 12, cursor: "pointer" }}>サンプル</button>
-                <button onClick={() => setParsed(parseSetlist(raw, catalog, settings))} disabled={!raw.trim()} style={{
-                  padding: "8px 18px", borderRadius: 8, border: "none",
-                  background: raw.trim() ? "#FFB454" : "#3A4157", color: "#12151E",
-                  fontWeight: 700, fontSize: 13, cursor: raw.trim() ? "pointer" : "not-allowed", fontFamily: "'Noto Sans JP'",
-                }}>解析する</button>
+                <button onClick={() => setRaw(SAMPLE)} style={ghostBtn}>サンプル</button>
+                <button onClick={() => setParsed(parseSetlist(raw, catalog, settings))} disabled={!raw.trim()} style={btnStyle(!!raw.trim())}>解析する</button>
               </div>
             </div>
           </section>
 
           <section>
             {!parsed ? (
-              <div style={{ border: "1px dashed #262C3F", borderRadius: 12, padding: 48, textAlign: "center", color: "#5C6378", fontSize: 13 }}>
+              <div style={{ border: "1px dashed var(--border)", borderRadius: "var(--radius-lg)", padding: 48, textAlign: "center", color: "var(--faint)", fontSize: 13 }}>
                 貼り付け・検索追加・チップ、どの入れ方でも同じ解析に落ちます
               </div>
             ) : (
               <div className="fadein">
-                <div style={{ ...cardStyle, padding: "18px 20px", marginBottom: 14 }}>
-                  <div style={{ display: "flex", alignItems: "baseline", gap: 14, flexWrap: "wrap" }}>
-                    <span style={{ fontFamily: "'JetBrains Mono'", fontWeight: 700, fontSize: 40, color: over ? "#F87171" : "#EDEFF5" }}>{fmt(total)}</span>
-                    <span style={{ fontFamily: "'JetBrains Mono'", fontSize: 16, color: "#5C6378" }}>/ {fmt(limitSec)}</span>
-                    <span style={{ marginLeft: "auto", fontFamily: "'JetBrains Mono'", fontSize: 14, fontWeight: 700, color: over ? "#F87171" : "#4ADE80" }}>
+                <div style={{ ...cardStyle, padding: "var(--card-pad)", marginBottom: 14 }}>
+                  <div style={{ display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap" }}>
+                    <span style={{ fontFamily: "'JetBrains Mono'", fontWeight: 700, fontSize: "var(--tc-size)", color: over ? "var(--alert)" : "var(--ink)" }}>{fmt(total)}</span>
+                    <span style={{ fontFamily: "'JetBrains Mono'", fontSize: 15, color: "var(--faint)" }}>/ {fmt(limitSec)}</span>
+                    <span style={{ marginLeft: "auto", fontFamily: "'JetBrains Mono'", fontSize: 13, fontWeight: 700, color: over ? "var(--alert)" : "var(--go)" }}>
                       {over ? `+${fmt(total - limitSec)} オーバー` : `残り ${fmt(limitSec - total)}`}
                     </span>
                   </div>
-                  <div style={{ marginTop: 12, height: 10, borderRadius: 99, background: "#12151E", overflow: "hidden" }}>
-                    <div style={{ width: `${Math.min(ratio * 100, 100)}%`, height: "100%", background: over ? "#F87171" : ratio > .93 ? "#FFB454" : "#4ADE80", transition: "width .4s ease", borderRadius: 99 }} />
+                  <div style={{ marginTop: 12, height: "var(--fader-h)", borderRadius: 99, background: "var(--border-soft)", overflow: "hidden" }}>
+                    <div style={{ width: `${Math.min(ratio * 100, 100)}%`, height: "100%", background: over ? "var(--alert)" : ratio > .93 ? "var(--accent)" : "var(--go)", transition: "width .4s ease", borderRadius: 99 }} />
                   </div>
-                  <div style={{ marginTop: 6, fontSize: 11, color: "#5C6378", display: "flex", justifyContent: "space-between" }}>
+                  <div style={{ marginTop: 7, fontSize: 11, color: "var(--faint)", display: "flex", justifyContent: "space-between" }}>
                     <span>{parsed.length} ブロック</span>
                     <span>{over ? "曲かMCの調整が必要です" : ratio > .93 ? "枠ギリギリ — 押しに注意" : "枠に収まっています"}</span>
                   </div>
                 </div>
 
                 <div style={{ ...cardStyle, overflow: "hidden" }}>
-                  {parsed.map((r, i) => {
-                    const cs = CUE_STYLE[r.cue];
-                    return (
-                      <div key={i} style={{ display: "flex", alignItems: "center", gap: 12, padding: "11px 16px", borderBottom: i < parsed.length - 1 ? "1px solid #232941" : "none" }}>
-                        <span style={{ fontFamily: "'JetBrains Mono'", fontSize: 12, color: "#5C6378", width: 22, textAlign: "right" }}>{i + 1}</span>
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <div style={{ fontWeight: r.isMC ? 500 : 700, fontSize: 14, color: r.isMC ? "#AEB4C6" : "#EDEFF5" }}>
-                            {r.title}
-                            {r.exit && <span style={{ marginLeft: 10, fontSize: 11, color: "#FFB454", border: "1px solid rgba(255,180,84,.4)", borderRadius: 4, padding: "1px 6px" }}>{r.exit}</span>}
-                          </div>
-                          {r.catalogNote && <div style={{ fontSize: 11, color: "#FFB454", marginTop: 2 }}>⚠ 曲マスタ表記: {r.catalogNote}</div>}
-                          {r.unknown && <div style={{ fontSize: 11, color: "#F87171", marginTop: 2 }}>？ 曲マスタ未登録 — 曲マスタタブから登録できます</div>}
-                          {r.recent && <div style={{ fontSize: 11, color: "#8A91A6", marginTop: 2 }}><span style={{ color: "#F9A8D4" }}>●</span> 直近使用 — {r.recent.date} {r.recent.event}</div>}
+                  {parsed.map((r, i) => (
+                    <div key={i} className="sk-row" style={{ display: "flex", alignItems: "center", gap: 12, padding: "var(--row-pad)", borderBottom: i < parsed.length - 1 ? "1px solid var(--border-soft)" : "none" }}>
+                      <span style={{ fontFamily: "'JetBrains Mono'", fontSize: 11.5, color: "var(--faint)", width: 20, textAlign: "right", flexShrink: 0 }}>{i + 1}</span>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontWeight: r.isMC ? 500 : 600, fontSize: 13.5, color: r.isMC ? "var(--dim)" : "var(--ink)" }}>
+                          {r.title}
+                          {r.exit && <span style={{ marginLeft: 8, fontSize: 10.5, color: "var(--accent)", border: "1px solid color-mix(in srgb, var(--accent) 40%, transparent)", borderRadius: 4, padding: "1px 6px", whiteSpace: "nowrap" }}>{r.exit}</span>}
                         </div>
-                        {settings.showCue && <span style={{ fontSize: 11, fontWeight: 700, padding: "3px 9px", borderRadius: 99, background: cs.bg, color: cs.fg, border: `1px solid ${cs.bd}`, whiteSpace: "nowrap" }}>{r.cue}</span>}
-                        <span style={{ fontFamily: "'JetBrains Mono'", fontSize: 13, color: "#AEB4C6", width: 44, textAlign: "right" }}>{fmt(r.sec)}</span>
+                        {r.catalogNote && <div style={{ fontSize: 10.5, color: "var(--accent)", marginTop: 2 }}>⚠ 曲マスタ表記: {r.catalogNote}</div>}
+                        {r.unknown && <div style={{ fontSize: 10.5, color: "var(--alert)", marginTop: 2 }}>？ 曲マスタ未登録 — 曲マスタタブから登録できます</div>}
+                        {r.recent && <div style={{ fontSize: 10.5, color: "var(--faint)", marginTop: 2 }}><span style={{ color: "var(--pink)" }}>●</span> 直近使用 — {r.recent.date} {r.recent.event}</div>}
                       </div>
-                    );
-                  })}
+                      {settings.showCue && <Badge cue={r.cue} />}
+                      <span style={{ fontFamily: "'JetBrains Mono'", fontSize: 12.5, color: "var(--dim)", width: 42, textAlign: "right", flexShrink: 0 }}>{fmt(r.sec)}</span>
+                    </div>
+                  ))}
                 </div>
 
                 <div style={{ display: "flex", gap: 10, marginTop: 14, flexWrap: "wrap" }}>
-                  <button onClick={() => ping("PDF出力はβで提供予定 — 書式テンプレートは運営ごとにカスタムできます")} style={{ padding: "10px 20px", borderRadius: 8, border: "none", background: "#FFB454", color: "#12151E", fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "'Noto Sans JP'" }}>PDFに出力</button>
-                  <button onClick={() => ping("音源・歌割まとめ機能はβで提供予定")} style={{ padding: "10px 20px", borderRadius: 8, border: "1px solid #262C3F", background: "transparent", color: "#AEB4C6", fontSize: 13, cursor: "pointer" }}>音源・歌割をまとめる</button>
+                  <button onClick={() => ping("PDF出力はβで提供予定 — 書式テンプレートは運営ごとにカスタムできます")} style={btnStyle()}>PDFに出力</button>
+                  <button onClick={() => ping("音源・歌割まとめ機能はβで提供予定")} style={{ ...ghostBtn, padding: "9px 18px", fontSize: 13 }}>音源・歌割をまとめる</button>
                 </div>
               </div>
             )}
@@ -448,53 +497,49 @@ export default function Sidekick() {
 
       {/* ================= タイムテーブル ================= */}
       {mode === "tt" && (
-        <main className="two-col" style={{ padding: 24 }}>
-          <section style={{ ...cardStyle, padding: 18 }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: "#AEB4C6", marginBottom: 10 }}>出演リスト（グループ名 持ち時間）</div>
+        <main className="two-col" style={{ padding: "20px 24px" }}>
+          <section style={{ ...cardStyle, padding: "var(--card-pad)" }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "var(--dim)", marginBottom: 10 }}>出演リスト（グループ名 持ち時間）</div>
             <textarea value={ttRaw} onChange={(e) => setTtRaw(e.target.value)} placeholder={"1行に1組\n例）KOURiN 25"} rows={9}
-              style={{ ...inputStyle, width: "100%", boxSizing: "border-box", resize: "vertical", lineHeight: 1.7, padding: 12 }} />
+              style={{ ...inputStyle, width: "100%", boxSizing: "border-box", resize: "vertical", lineHeight: 1.8, padding: 12 }} />
             <div style={{ display: "flex", gap: 12, marginTop: 12, alignItems: "center", flexWrap: "wrap" }}>
-              <label style={{ fontSize: 12, color: "#8A91A6" }}>START</label>
+              <label style={{ fontSize: 12, color: "var(--dim)" }}>START</label>
               <input value={ttStart} onChange={(e) => setTtStart(e.target.value)} style={{ ...inputStyle, width: 62 }} />
-              <label style={{ fontSize: 12, color: "#8A91A6" }}>転換</label>
+              <label style={{ fontSize: 12, color: "var(--dim)" }}>転換</label>
               <input type="number" value={ttChange} onChange={(e) => setTtChange(Number(e.target.value))} style={{ ...inputStyle, width: 52 }} />
-              <span style={{ fontSize: 12, color: "#8A91A6" }}>分</span>
+              <span style={{ fontSize: 12, color: "var(--dim)" }}>分</span>
               <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
-                <button onClick={() => setTtRaw(SAMPLE_TT)} style={{ padding: "8px 12px", borderRadius: 8, border: "1px solid #262C3F", background: "transparent", color: "#8A91A6", fontSize: 12, cursor: "pointer" }}>サンプル</button>
-                <button onClick={() => setTtRows(buildTimetable(ttRaw, ttStart, ttChange))} disabled={!ttRaw.trim()} style={{
-                  padding: "8px 18px", borderRadius: 8, border: "none",
-                  background: ttRaw.trim() ? "#FFB454" : "#3A4157", color: "#12151E", fontWeight: 700, fontSize: 13,
-                  cursor: ttRaw.trim() ? "pointer" : "not-allowed", fontFamily: "'Noto Sans JP'",
-                }}>TTを組む</button>
+                <button onClick={() => setTtRaw(SAMPLE_TT)} style={ghostBtn}>サンプル</button>
+                <button onClick={() => setTtRows(buildTimetable(ttRaw, ttStart, ttChange))} disabled={!ttRaw.trim()} style={btnStyle(!!ttRaw.trim())}>TTを組む</button>
               </div>
             </div>
           </section>
           <section>
             {!ttRows ? (
-              <div style={{ border: "1px dashed #262C3F", borderRadius: 12, padding: 48, textAlign: "center", color: "#5C6378", fontSize: 13 }}>
+              <div style={{ border: "1px dashed var(--border)", borderRadius: "var(--radius-lg)", padding: 48, textAlign: "center", color: "var(--faint)", fontSize: 13 }}>
                 出演リストを入れて「TTを組む」を押すと転換込みで自動生成
               </div>
             ) : (
               <div className="fadein">
                 <div style={{ ...cardStyle, overflow: "hidden" }}>
                   {ttRows.map((s, i) => (
-                    <div key={i} style={{
+                    <div key={i} className="sk-row" style={{
                       display: "flex", alignItems: "center", gap: 14,
-                      padding: s.type === "act" ? "13px 16px" : "7px 16px",
-                      borderBottom: i < ttRows.length - 1 ? "1px solid #232941" : "none",
-                      background: s.type === "change" ? "rgba(138,145,166,.05)" : "transparent",
+                      padding: s.type === "act" ? "var(--row-pad)" : "6px 16px",
+                      borderBottom: i < ttRows.length - 1 ? "1px solid var(--border-soft)" : "none",
+                      background: s.type === "change" ? "color-mix(in srgb, var(--dim) 4%, transparent)" : "transparent",
                     }}>
-                      <span style={{ fontFamily: "'JetBrains Mono'", fontSize: 13, color: s.type === "act" ? "#FFB454" : "#5C6378", width: 104 }}>{clock(s.from)} – {clock(s.to)}</span>
-                      <span style={{ flex: 1, fontWeight: s.type === "act" ? 700 : 400, fontSize: s.type === "act" ? 14 : 12, color: s.type === "act" ? "#EDEFF5" : "#5C6378" }}>
+                      <span style={{ fontFamily: "'JetBrains Mono'", fontSize: 12.5, color: s.type === "act" ? "var(--accent)" : "var(--faint)", width: 100, flexShrink: 0 }}>{clock(s.from)} – {clock(s.to)}</span>
+                      <span style={{ flex: 1, fontWeight: s.type === "act" ? 700 : 400, fontSize: s.type === "act" ? 13.5 : 11.5, color: s.type === "act" ? "var(--ink)" : "var(--faint)" }}>
                         {s.type === "act" ? `${s.no}. ${s.name}` : "転換"}
                       </span>
-                      <span style={{ fontFamily: "'JetBrains Mono'", fontSize: 12, color: "#8A91A6" }}>{s.min}分</span>
+                      <span style={{ fontFamily: "'JetBrains Mono'", fontSize: 12, color: "var(--dim)" }}>{s.min}分</span>
                     </div>
                   ))}
                 </div>
-                <div style={{ marginTop: 10, fontSize: 12, color: "#8A91A6", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <div style={{ marginTop: 10, fontSize: 12, color: "var(--dim)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                   <span>終演 {clock(ttRows[ttRows.length - 1].to)}</span>
-                  <button onClick={() => ping("進行表PDF・スタッフ共有はβで提供予定")} style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: "#FFB454", color: "#12151E", fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "'Noto Sans JP'" }}>進行表PDFに出力</button>
+                  <button onClick={() => ping("進行表PDF・スタッフ共有はβで提供予定")} style={{ ...btnStyle(), padding: "8px 16px", fontSize: 12 }}>進行表PDFに出力</button>
                 </div>
               </div>
             )}
@@ -504,58 +549,49 @@ export default function Sidekick() {
 
       {/* ================= 曲マスタ ================= */}
       {mode === "catalog" && (
-        <main className="two-col" style={{ padding: 24 }}>
+        <main className="two-col" style={{ padding: "20px 24px" }}>
           <section>
-            {/* 個別追加 */}
-            <div style={{ ...cardStyle, padding: 18, marginBottom: 16 }}>
-              <div style={{ fontSize: 13, fontWeight: 700, color: "#AEB4C6", marginBottom: 12 }}>曲を登録</div>
+            <div style={{ ...cardStyle, padding: "var(--card-pad)", marginBottom: 16 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: "var(--dim)", marginBottom: 12 }}>曲を登録</div>
               <div style={{ display: "grid", gap: 10 }}>
                 <input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="曲名" style={{ ...inputStyle, fontFamily: "'Noto Sans JP'" }} />
                 <div style={{ display: "flex", gap: 10 }}>
                   <input value={newLen} onChange={(e) => setNewLen(e.target.value)} placeholder="尺 3:43" style={{ ...inputStyle, width: 90 }} />
                   <input value={newAlias} onChange={(e) => setNewAlias(e.target.value)} placeholder="別名（表記ゆれ、カンマ区切り）" style={{ ...inputStyle, flex: 1, fontFamily: "'Noto Sans JP'" }} />
                 </div>
-                <button onClick={addToCatalog} style={{ padding: "9px 0", borderRadius: 8, border: "none", background: "#FFB454", color: "#12151E", fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "'Noto Sans JP'" }}>登録する</button>
+                <button onClick={addToCatalog} style={{ ...btnStyle(), padding: "9px 0" }}>登録する</button>
               </div>
             </div>
-
-            {/* 一括インポート */}
-            <div style={{ ...cardStyle, padding: 18 }}>
-              <div style={{ fontSize: 13, fontWeight: 700, color: "#AEB4C6", marginBottom: 8 }}>一括インポート</div>
-              <div style={{ fontSize: 11, color: "#5C6378", marginBottom: 10, lineHeight: 1.7 }}>
+            <div style={{ ...cardStyle, padding: "var(--card-pad)" }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: "var(--dim)", marginBottom: 8 }}>一括インポート</div>
+              <div style={{ fontSize: 11, color: "var(--faint)", marginBottom: 10, lineHeight: 1.7 }}>
                 「曲名 M:SS」を1行ずつ貼るだけで全曲登録。<br />新しいグループの導入は30秒で終わります。
               </div>
               <textarea value={importText} onChange={(e) => setImportText(e.target.value)} placeholder={"例）\nはじまりの鐘 4:02\n真夜中シグナル 3:28"} rows={6}
-                style={{ ...inputStyle, width: "100%", boxSizing: "border-box", resize: "vertical", lineHeight: 1.7, padding: 12 }} />
+                style={{ ...inputStyle, width: "100%", boxSizing: "border-box", resize: "vertical", lineHeight: 1.8, padding: 12 }} />
               <div style={{ display: "flex", gap: 8, marginTop: 10, justifyContent: "flex-end" }}>
                 <button onClick={() => { setCatalog([]); ping("曲マスタを空にしました — 自分のグループの曲を登録してください"); }}
-                  style={{ padding: "8px 12px", borderRadius: 8, border: "1px solid #262C3F", background: "transparent", color: "#F87171", fontSize: 12, cursor: "pointer" }}>全削除</button>
-                <button onClick={runImport} disabled={!importText.trim()} style={{
-                  padding: "8px 16px", borderRadius: 8, border: "none",
-                  background: importText.trim() ? "#FFB454" : "#3A4157", color: "#12151E", fontWeight: 700, fontSize: 12,
-                  cursor: importText.trim() ? "pointer" : "not-allowed", fontFamily: "'Noto Sans JP'",
-                }}>インポート</button>
+                  style={{ ...ghostBtn, color: "var(--alert)" }}>全削除</button>
+                <button onClick={runImport} disabled={!importText.trim()} style={{ ...btnStyle(!!importText.trim()), padding: "8px 16px", fontSize: 12 }}>インポート</button>
               </div>
             </div>
           </section>
-
-          {/* 曲リスト */}
           <section style={{ ...cardStyle, overflow: "hidden" }}>
-            <div style={{ padding: "12px 16px", borderBottom: "1px solid #232941", fontSize: 12, color: "#8A91A6", display: "flex", justifyContent: "space-between" }}>
+            <div style={{ padding: "12px 16px", borderBottom: "1px solid var(--border-soft)", fontSize: 12, color: "var(--dim)", display: "flex", justifyContent: "space-between" }}>
               <span>登録曲 {catalog.length}</span>
               <span>セトリ解析の尺補完・表記ゆれ解決に使われます</span>
             </div>
             {catalog.length === 0 ? (
-              <div style={{ padding: 40, textAlign: "center", color: "#5C6378", fontSize: 13 }}>まだ曲がありません — 左から登録 or 一括インポート</div>
+              <div style={{ padding: 40, textAlign: "center", color: "var(--faint)", fontSize: 13 }}>まだ曲がありません — 左から登録 or 一括インポート</div>
             ) : catalog.map((c, i) => (
-              <div key={i} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 16px", borderBottom: i < catalog.length - 1 ? "1px solid #232941" : "none" }}>
+              <div key={i} className="sk-row" style={{ display: "flex", alignItems: "center", gap: 12, padding: "var(--row-pad)", borderBottom: i < catalog.length - 1 ? "1px solid var(--border-soft)" : "none" }}>
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 14, fontWeight: 700 }}>{c.name}</div>
-                  {(c.aliases || []).length > 0 && <div style={{ fontSize: 11, color: "#5C6378", marginTop: 2 }}>別名: {c.aliases.join(" / ")}</div>}
+                  <div style={{ fontSize: 13.5, fontWeight: 600 }}>{c.name}</div>
+                  {(c.aliases || []).length > 0 && <div style={{ fontSize: 10.5, color: "var(--faint)", marginTop: 2 }}>別名: {c.aliases.join(" / ")}</div>}
                 </div>
-                <span style={{ fontFamily: "'JetBrains Mono'", fontSize: 13, color: "#AEB4C6" }}>{fmt(c.sec)}</span>
+                <span style={{ fontFamily: "'JetBrains Mono'", fontSize: 12.5, color: "var(--dim)" }}>{fmt(c.sec)}</span>
                 <button onClick={() => setCatalog((cat) => cat.filter((_, j) => j !== i))}
-                  style={{ padding: "4px 10px", borderRadius: 6, border: "1px solid #262C3F", background: "transparent", color: "#5C6378", fontSize: 11, cursor: "pointer" }}>削除</button>
+                  style={{ padding: "4px 10px", borderRadius: 6, border: "1px solid var(--border)", background: "transparent", color: "var(--faint)", fontSize: 11, cursor: "pointer" }}>削除</button>
               </div>
             ))}
           </section>
@@ -564,23 +600,44 @@ export default function Sidekick() {
 
       {/* ================= 設定 ================= */}
       {mode === "config" && (
-        <main style={{ padding: 24, maxWidth: 560 }}>
-          <div style={{ ...cardStyle, padding: 20 }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: "#AEB4C6", marginBottom: 6 }}>グループ設定</div>
-            <div style={{ fontSize: 11, color: "#5C6378", marginBottom: 16, lineHeight: 1.7 }}>
+        <main style={{ padding: "20px 24px", maxWidth: 560 }}>
+          <div style={{ ...cardStyle, padding: "var(--card-pad)" }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "var(--dim)", marginBottom: 6 }}>グループ設定</div>
+            <div style={{ fontSize: 11, color: "var(--faint)", marginBottom: 16, lineHeight: 1.7 }}>
               セトリの流儀はグループごとに違う。使う項目だけONにして、あなたの書式に合わせられます。
             </div>
-            <label style={{ display: "block", fontSize: 12, color: "#8A91A6", marginBottom: 6 }}>グループ名</label>
+            <label style={{ display: "block", fontSize: 12, color: "var(--dim)", marginBottom: 6 }}>グループ名</label>
             <input value={settings.groupName} onChange={(e) => set("groupName", e.target.value)}
-              style={{ ...inputStyle, width: "100%", boxSizing: "border-box", fontFamily: "'Noto Sans JP'", marginBottom: 8 }} />
+              style={{ ...inputStyle, width: "100%", boxSizing: "border-box", fontFamily: "'Noto Sans JP'", marginBottom: 12 }} />
+
+            <label style={{ display: "block", fontSize: 12, color: "var(--dim)", marginBottom: 8 }}>テーマ</label>
+            <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+              {[
+                { id: "dark", label: "ダーク", desc: "夜の袖・楽屋向き" },
+                { id: "light", label: "ライト", desc: "昼の事務所向き" },
+              ].map((t) => (
+                <button key={t.id} onClick={() => set("theme", t.id)} style={{
+                  flex: 1, padding: "12px 10px", borderRadius: "var(--radius)",
+                  border: settings.theme === t.id ? "1.5px solid var(--accent)" : "1px solid var(--border)",
+                  background: settings.theme === t.id ? "color-mix(in srgb, var(--accent) 8%, var(--surface))" : "var(--surface2)",
+                  color: settings.theme === t.id ? "var(--accent)" : "var(--dim)",
+                  cursor: "pointer", fontFamily: "'Noto Sans JP'", fontWeight: 700, fontSize: 13, textAlign: "center",
+                }}>
+                  {t.label}
+                  <span style={{ display: "block", fontSize: 10, fontWeight: 400, marginTop: 3, opacity: .8 }}>{t.desc}</span>
+                </button>
+              ))}
+            </div>
+
             <Toggle on={settings.showCue} onChange={(v) => set("showCue", v)}
               label="キッカケの自動判定" desc="音先・連続・曲振・inst BGM を順番から自動で付与" />
             <Toggle on={settings.autoExit} onChange={(v) => set("autoExit", v)}
               label="退場処理の自動付与" desc="末尾がMCなら「退場BGMあり」、楽曲なら「アウトロで退場します」" />
             <Toggle on={settings.showRecent} onChange={(v) => set("showRecent", v)}
               label="直近使用チェック" desc="過去公演でやった曲に「直近使用」を表示（被り防止）" />
-            <div style={{ marginTop: 16, padding: "12px 14px", borderRadius: 8, background: "rgba(255,180,84,.06)", border: "1px solid rgba(255,180,84,.2)", fontSize: 11, color: "#8A91A6", lineHeight: 1.8 }}>
-              <b style={{ color: "#FFB454" }}>β予定:</b> 独自列の追加（track・衣装・立ち位置など）／キッカケ用語のカスタム／PDFテンプレートのデザイン変更／曲マスタと公演履歴のクラウド保存
+
+            <div style={{ marginTop: 16, padding: "12px 14px", borderRadius: "var(--radius)", background: "color-mix(in srgb, var(--accent) 6%, transparent)", border: "1px solid color-mix(in srgb, var(--accent) 20%, transparent)", fontSize: 11, color: "var(--dim)", lineHeight: 1.8 }}>
+              <b style={{ color: "var(--accent)" }}>β予定:</b> 独自列の追加（track・衣装・立ち位置など）／キッカケ用語のカスタム／PDFテンプレートのデザイン変更／曲マスタと公演履歴のクラウド保存
             </div>
           </div>
         </main>
@@ -589,14 +646,14 @@ export default function Sidekick() {
       {toast && (
         <div className="fadein" style={{
           position: "fixed", bottom: 24, left: "50%", transform: "translateX(-50%)",
-          background: "#262C3F", border: "1px solid rgba(255,180,84,.4)", color: "#EDEFF5",
-          padding: "12px 20px", borderRadius: 10, fontSize: 13, maxWidth: "88vw",
-          boxShadow: "0 8px 32px rgba(0,0,0,.45)", zIndex: 50,
+          background: "var(--surface2)", border: "1px solid color-mix(in srgb, var(--accent) 40%, transparent)",
+          color: "var(--ink)", padding: "12px 20px", borderRadius: 10, fontSize: 13, maxWidth: "88vw",
+          boxShadow: "0 8px 32px rgba(0,0,0,.35)", zIndex: 50,
         }}>{toast}</div>
       )}
 
-      <footer style={{ padding: "28px 24px", fontSize: 11, color: "#3A4157", textAlign: "center", letterSpacing: ".05em" }}>
-        SIDEKICK v0.2 demo — song master / hybrid input / per-group settings
+      <footer style={{ padding: "26px 24px", fontSize: 10.5, color: "var(--faint)", textAlign: "center", letterSpacing: ".06em" }}>
+        SIDEKICK v0.3 demo — dual theme / song master / hybrid input / per-group settings
       </footer>
     </div>
   );
