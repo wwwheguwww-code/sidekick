@@ -215,7 +215,7 @@ const MEMBER_COLORS = ["#A78BFA", "#FDE047", "#4ADE80", "#F1F5F9", "#FB923C", "#
 const inputStyle = {
   background: "var(--surface2)", color: "var(--ink)", border: "1px solid var(--border)",
   borderRadius: "var(--radius)", padding: "8px 10px",
-  fontFamily: "'JetBrains Mono', monospace", fontSize: 13,
+  fontFamily: "'JetBrains Mono', monospace",
 };
 const cardStyle = {
   background: "var(--surface)", border: "1px solid var(--border)",
@@ -359,6 +359,10 @@ export default function Sidekick() {
         @media (prefers-reduced-motion: reduce) { .fadein { animation: none; } }
         .two-col { display: grid; grid-template-columns: minmax(300px, 420px) 1fr; gap: 18px; align-items: start; }
         @media (max-width: 860px) { .two-col { grid-template-columns: 1fr; } }
+        input, textarea { font-size: 13px; }
+        @media (max-width: 860px) {
+          input, textarea { font-size: 16px; }
+        }
         .sk-row:hover { background: color-mix(in srgb, var(--ink) 3%, transparent); }
       `}</style>
 
