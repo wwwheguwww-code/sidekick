@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect } from "react";
-import { DndContext, closestCenter, PointerSensor, useSensor, useSensors } from "@dnd-kit/core";
+import { DndContext, closestCenter, MouseSensor, TouchSensor, useSensor, useSensors } from "@dnd-kit/core";
 import { SortableContext, verticalListSortingStrategy, useSortable, arrayMove } from "@dnd-kit/sortable";
 
 /* ============================================================
@@ -342,7 +342,14 @@ export default function Sidekick() {
   const [setlistImport, setSetlistImport] = useState("");
   const [editingId, setEditingId] = useState(null);
   const [editLen, setEditLen] = useState("");
-  const dndSensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
+  /* MouseSensor(マウスのみ・distance) + TouchSensor(タッチのみ・delay) を分離。
+     PointerSensorはmousedown/touchstart両方の代わりにpointerdownを使うため
+     タッチでもdistance制約が先に成立してしまい、TouchSensorのdelayが無効化される。
+     MouseSensorはonMouseDownのみを見るためタッチ操作では原則発火せず競合しない。 */
+  const dndSensors = useSensors(
+    useSensor(MouseSensor, { activationConstraint: { distance: 5 } }),
+    useSensor(TouchSensor, { activationConstraint: { delay: 200, tolerance: 8 } }),
+  );
 
   const [ttRaw, setTtRaw] = useState("");
   const [ttStart, setTtStart] = useState("18:00");
@@ -401,7 +408,13 @@ export default function Sidekick() {
       return next;
     });
   };
+  /* ドラッグ中はページの touch-action を止めてブラウザの追従スクロールを抑止。
+     overflow:hidden は端でのdnd-kit autoScroll(window.scrollBy)自体も殺してしまうため使わない。 */
+  const lockPageScroll = () => { document.body.style.touchAction = "none"; };
+  const unlockPageScroll = () => { document.body.style.touchAction = ""; };
+  const handleDragStart = () => { lockPageScroll(); };
   const handleDragEnd = ({ active, over }) => {
+    unlockPageScroll();
     if (!over || active.id === over.id) return;
     setItems((p) => {
       const from = p.findIndex((r) => r.id === active.id);
@@ -410,6 +423,7 @@ export default function Sidekick() {
       return arrayMove(p, from, to);
     });
   };
+  const handleDragCancel = () => { unlockPageScroll(); };
   const startEdit = (r) => { setEditingId(r.id); setEditLen(fmt(r.sec)); };
   const commitEdit = (id) => {
     const sec = parseLen(editLen);
@@ -575,7 +589,8 @@ export default function Sidekick() {
               曲マスタから検索して追加するか、<br />「テキスト読込」でいつものセトリを貼り付け。<br />並び替えるたびにキッカケとtotalが自動で追いつきます。
             </div>
           ) : (
-            <DndContext sensors={dndSensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+            <DndContext sensors={dndSensors} collisionDetection={closestCenter}
+              onDragStart={handleDragStart} onDragEnd={handleDragEnd} onDragCancel={handleDragCancel}>
               <SortableContext items={computed.map((r) => r.id)} strategy={verticalListSortingStrategy}>
                 <section style={{ ...cardStyle, overflow: "hidden" }}>
                   {computed.map((r, i) => (
